@@ -65,7 +65,8 @@ const cosmosRequestType = [
 ] as const
 
 export type requestParameter = {
-  id?: string
+  id?: string | number,
+  jsonrpc?: string,
   method:
     | typeof evmRequest[number]
     | typeof solRequestType[number]

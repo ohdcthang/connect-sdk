@@ -1,9 +1,5 @@
-import { io } from 'socket.io-client'
 import { EventEmitter } from 'events'
-import { SERVER } from '../config'
 import {
-  // eslint-disable-next-line no-unused-vars
-  EventType,
   // eslint-disable-next-line no-unused-vars
   requestParameter,
   // eslint-disable-next-line no-unused-vars
@@ -14,14 +10,21 @@ import bs58 from '../utils/base58'
 import BigIntPolyfill from 'bignumber.js'
 import { CosmJSOfflineSigner, CosmJSOfflineSignerOnlyAmino } from './cosmos'
 import { DeviceUUID } from 'device-uuid'
-
+import { Consumer } from 'sqs-consumer'
+import axios, { AxiosInstance } from 'axios'
+import { QUEUE_URL, SERVER_ENPOINT, SQS_CLIENT } from 'config'
+import { generateClient } from 'api'
 declare let window: any
 
 class Coin98Client extends EventEmitter {
+  static instance: Coin98Client
+  private axiosClient: AxiosInstance
+
   protected isConnected: boolean = false
   protected isNative?: boolean = false
 
   private id?: string | number[]
+  private accessToken?: string
   private shouldReconnect: boolean = false
   private name: string | any
 
@@ -30,43 +33,72 @@ class Coin98Client extends EventEmitter {
   public chain: string
   public callbackURL: string
 
-  constructor () {
+  constructor() {
     super()
-
-    this.generateClient()
+    if (Coin98Client.instance) {
+      return Coin98Client.instance
+    }
     // Polyfill
     if (typeof window !== 'undefined' && !window.BigInt) {
       window.BigInt = BigIntPolyfill
     }
 
-    return this
+    this.initSdk()
+
+    this.onResponse()
+
+    Coin98Client.instance = this
   }
 
-  private generateClient = () => {
-    this.onGenerateAppId()
+  async initSdk() {
+    const [existId, existToken] = [
+      window.localStorage.getItem('uuid'),
+      window.localStorage.getItem('accessToken')
+    ]
 
-    this.client = io(SERVER, {
-      transports: ['websocket'],
-      timeout: 600000,
-      closeOnBeforeunload: false,
-      reconnection: true,
-      autoConnect: true
-    })
+    if (!existId) {
+      this.id = new DeviceUUID().get()
+    } else {
+      this.id = existId
+    }
 
-    this.client.on('sdk_connect', (ev: EventType) => {
-      const { id } = ev.data
-      this.emit(id, ev.data)
-    })
+    if (!existToken) {
+      const { data } = await axios?.post(`${SERVER_ENPOINT}authenticate`, {
+        appId: this.id
+      })
 
-    this.client.on('disconnect', () => {
-      // Automatically reconnect | remove automatically disconnect
-      // this.isConnected = false
-      if (typeof this.client?.reconnect === 'function') {
-        this.client.reconnect()
-      }
-    })
+      this.accessToken = data.accessToken
+      window.localStorage.setItem('accessToken', data.accessToken)
+    } else {
+      this.accessToken = existToken
+    }
 
-    window.client = this.client
+    this.axiosClient = generateClient(this.accessToken as string, this.id as string)
+  }
+
+  async onResponse() {
+    if (this.id) {
+      const app = Consumer.create({
+        queueUrl: QUEUE_URL,
+        messageAttributeNames: ['All'],
+        sqs: SQS_CLIENT,
+        visibilityTimeout: 0, 
+        // waitTimeSeconds: 0,
+        handleMessage: async (message) => {
+          const { MessageAttributes } = message
+          if(MessageAttributes?.appId?.StringValue === this.id){
+            this.emit( MessageAttributes?.id?.StringValue as string, {
+              result: message.Body
+            })
+          }
+        }
+      })
+
+      app.on('processing_error', (_err) => {
+      })
+
+      app.start()
+    }
   }
 
   public connect = (chain: string, options: connectOptions) => {
@@ -82,69 +114,42 @@ class Coin98Client extends EventEmitter {
       throw new Error('Dapps Name required')
     }
 
-    if (!this.client) {
-      this.generateClient()
-    }
-
     this.chain = chain
     this.name = options.name
 
-    // Reset Connection ID
-    if (!options.id) {
-      this.onGenerateAppId()
-    }
-    // Validate Input
-
-    return new Promise((resolve, reject) => {
-      // Initialize SDK
-      this.client.emit(
-        'coin98_connect',
-        {
-          type: 'connection_request',
-          message: {
-            url: new URL(window.location.href).origin,
-            id: this.id
-          }
-        },
-        async (cnnStr: string) => {
-          // Verify your connection ID
-          const isVerify = await this.verifySession(cnnStr)
-
-          if (!isVerify) {
-            return reject(new Error('Session is over'))
-          }
-
-          // Make a response for your connection string
-          this.id = cnnStr
-
-          if (!this.isConnected) {
-            this.saveSession(this.id, chain)
-            const result: any = await this.request({
-              method: 'connect',
-              params: [options]
-            })
-
-            const errors = result?.error || result?.errors || !result.result
-
-            if (errors) {
-              return reject(new Error(errors.message || 'Connection Rejected'))
-            }
-
-            this.isConnected = true
-            this.shouldReconnect = true
-
-            resolve(result)
-          }
+    return new Promise(async (resolve, reject) => {
+      const { data } = await this.axiosClient?.post('/send-message', {
+        appId: this.id,
+        message: 'connection_request',
+        attributes: {
+          url: new URL(window.location.href).origin,
+          id: this.id
         }
-      )
+      })
+
+      if (!this.isConnected) {
+        const result: any = await this.request({
+          method: 'connect',
+          params: [{ ...options, messageId: data?.MessageId }]
+        })
+
+        const errors = result?.error || result?.errors || !result.result
+
+        if (errors) {
+          return reject(new Error(errors.message || 'Connect Rejected'))
+        }
+
+        this.isConnected = true
+
+        this.shouldReconnect = true
+
+        resolve(result)
+      }
     })
   }
 
   public disconnect = () => {
     this.isConnected = false
-    // Emit disconnect event
-    this.emit('disconnect')
-    // Cleanup connection
     this.clearSession()
     this.client.close()
   }
@@ -165,11 +170,17 @@ class Coin98Client extends EventEmitter {
 
     const id: string = uniqueId()
 
-    const requestParams = {
+    const requestParams =  {
       ...args,
       id,
-      chain: this.chain
+      appId: this.id,
+      chain: this.chain,
+      accessToken: this.accessToken
     }
+
+    if (args.method !== 'connect') {
+      delete requestParams.accessToken
+    } 
 
     const isSolana: boolean = requestParams.method.startsWith('sol')
     const isCosmos: boolean = requestParams.method.startsWith('cosmos')
@@ -192,16 +203,16 @@ class Coin98Client extends EventEmitter {
       this.callbackURL || window?.location?.href
     )
 
-    const encodedURL = `${this.id}&request=${this.santinizeParams(
+    const encodedURL = this.santinizeParams(
       requestParams
-    )}`
+    )
 
     const _this = this
     const promisify = new Promise((resolve) => {
-      _this.once(id, (e) => {
+      _this.once(id as string, (e) => {
         resolve(e)
       })
-      this.openURL(encodedURL)
+      this.openURL(encodedURL, args.method)
     })
 
     const result = await promisify
@@ -272,49 +283,20 @@ class Coin98Client extends EventEmitter {
     return encodeURIComponent(JSON.stringify(params))
   }
 
-  private saveSession (id: string, chain: string) {
+  private clearSession() {
     if (
       typeof window !== 'undefined' &&
       typeof sessionStorage !== 'undefined'
     ) {
-      window.sessionStorage.setItem(
-        'Coin98Connection',
-        JSON.stringify({ id, chain })
-      )
+      window.sessionStorage.removeItem('accessToken')
     }
   }
 
-  private verifySession (uri: string): Promise<boolean> {
-    const sParams = new URLSearchParams(uri.split('?')[1])
-    const token = sParams.get('connect')
-
-    return new Promise(resolve => {
-      this.client.emit('coin98_connect', {
-        type: 'verify_sdk',
-        message: {
-          token
-        }
-      }, (response: boolean) => {
-        resolve(response)
-      })
-    })
-  }
-
-  private clearSession () {
-    if (
-      typeof window !== 'undefined' &&
-      typeof sessionStorage !== 'undefined'
-    ) {
-      window.sessionStorage.removeItem('Coin98Connection')
-    }
-  }
-
-  private openURL (url: string) {
+  private openURL(url: string, method: string) {
     // Santinize url
-    url = encodeURIComponent(url)
-    url = url.startsWith('coin98://') ? url : `coin98://${url}`
+    const urlEncode = encodeURIComponent(url)
+    url = `saringan://app/${method}/${urlEncode}`
     if (window.location.hash) {
-      console.log('send?----')
       // Simulate Href Click
       const aTag = document.createElement('a')
       aTag.setAttribute('id', 'coin98Clickable')
@@ -331,19 +313,6 @@ class Coin98Client extends EventEmitter {
       })
     } else {
       window.location.href = url
-    }
-  }
-
-  private onGenerateAppId = () => {
-    const existId = window.localStorage.getItem('uuid')
-    if (!existId) {
-      try {
-        this.id = new DeviceUUID().get()
-      } catch (e) {
-        this.id = window.localStorage.getItem('uuid') || uniqueId()
-      }
-    } else {
-      this.id = existId
     }
   }
 }
