@@ -295,7 +295,7 @@ class Coin98Client extends EventEmitter {
   private openURL(url: string, method: string) {
     // Santinize url
     const urlEncode = encodeURIComponent(url)
-    url = `saringan://app/${method}/${urlEncode}`
+    url = `coin98://app/${method}/${urlEncode}`
     if (window.location.hash) {
       // Simulate Href Click
       const aTag = document.createElement('a')

@@ -228,7 +228,9 @@ class Coin98Client extends EventEmitter {
       _this.once(id as string, (e) => {
         resolve(e)
       })
-      this.linkModule.openURL(encodedURL)
+
+      const url = this.santinizeURL(encodedURL)
+      this.linkModule.openURL(url)
     })
 
     const result = await promisify
@@ -298,12 +300,12 @@ class Coin98Client extends EventEmitter {
     return encodeURIComponent(JSON.stringify(params))
   }
 
-  // private santinizeURL = (url:string) => {
-  //   // Santinize url
-  //   url = encodeURIComponent(url)
-  //   url = url.startsWith('coin98://') ? url : `coin98://${url}`
-  //   return url
-  // }
+  private santinizeURL = (url:string) => {
+    // Santinize url
+    url = encodeURIComponent(url)
+    url = url.startsWith('coin98://') ? url : `coin98://app/${url}`
+    return url
+  }
 
   // private getSession () {
   //   try {
