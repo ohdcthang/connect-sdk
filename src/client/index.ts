@@ -12,14 +12,13 @@ import { CosmJSOfflineSigner, CosmJSOfflineSignerOnlyAmino } from './cosmos'
 import { DeviceUUID } from 'device-uuid'
 import { Consumer } from 'sqs-consumer'
 import axios, { AxiosInstance } from 'axios'
-import { QUEUE_URL, SERVER_ENPOINT, SQS_CLIENT } from 'config'
 import { generateClient } from 'api'
+import { SQSClient } from '@aws-sdk/client-sqs'
+import { SERVER_ENPOINT } from 'config'
 declare let window: any
 
 class Coin98Client extends EventEmitter {
   static instance: Coin98Client
-  private axiosClient: AxiosInstance
-
   protected isConnected: boolean = false
   protected isNative?: boolean = false
 
@@ -27,6 +26,9 @@ class Coin98Client extends EventEmitter {
   private accessToken?: string
   private shouldReconnect: boolean = false
   private name: string | any
+  private axiosClient: AxiosInstance
+  private sqsClient: SQSClient
+  private queueUrl: string
 
   public client: any
   public linkModule?: any
@@ -73,16 +75,38 @@ class Coin98Client extends EventEmitter {
       this.accessToken = existToken
     }
 
-    this.axiosClient = generateClient(this.accessToken as string, this.id as string)
+    this.axiosClient = generateClient( this.accessToken as string, this.id as string )
+  }
+
+  async initCofigSqs() {
+    const { data } = await axios.get(
+      'https://payment-api-8clk.vercel.app/config'
+    )
+    const config = data?.config || {}
+
+    const { accessKeyId, region, secretAccessKey, queueUrl } = config
+
+    const sqsConfig = {
+      region,
+      credentials: {
+        accessKeyId,
+        secretAccessKey
+      }
+    }
+
+    this.sqsClient = new SQSClient(sqsConfig)
+    this.queueUrl = queueUrl
   }
 
   async onResponse() {
-    if (this.id) {
+    await this.initCofigSqs()
+
+    if (this.id &&  this.sqsClient) {
       const app = Consumer.create({
-        queueUrl: QUEUE_URL,
+        queueUrl: this.queueUrl,
         messageAttributeNames: ['All'],
-        sqs: SQS_CLIENT,
-        visibilityTimeout: 0, 
+        sqs: this.sqsClient,
+        visibilityTimeout: 0,
         // waitTimeSeconds: 0,
         handleMessage: async (message) => {
           const { MessageAttributes } = message
@@ -93,10 +117,9 @@ class Coin98Client extends EventEmitter {
           }
         }
       })
-
-      app.on('processing_error', (_err) => {
-      })
-
+  
+      app.on('processing_error', (_err) => {})
+  
       app.start()
     }
   }
@@ -170,7 +193,7 @@ class Coin98Client extends EventEmitter {
 
     const id: string = uniqueId()
 
-    const requestParams =  {
+    const requestParams = {
       ...args,
       id,
       appId: this.id,
@@ -180,7 +203,7 @@ class Coin98Client extends EventEmitter {
 
     if (args.method !== 'connect') {
       delete requestParams.accessToken
-    } 
+    }
 
     const isSolana: boolean = requestParams.method.startsWith('sol')
     const isCosmos: boolean = requestParams.method.startsWith('cosmos')
@@ -203,9 +226,7 @@ class Coin98Client extends EventEmitter {
       this.callbackURL || window?.location?.href
     )
 
-    const encodedURL = this.santinizeParams(
-      requestParams
-    )
+    const encodedURL = this.santinizeParams(requestParams)
 
     const _this = this
     const promisify = new Promise((resolve) => {
@@ -221,15 +242,15 @@ class Coin98Client extends EventEmitter {
   }
 
   // Cosmos Methods
-  public getOfflineSigner (chainId: string) {
+  public getOfflineSigner(chainId: string) {
     return new CosmJSOfflineSigner(chainId, this)
   }
 
-  public getOfflineSignerAuto (chainId: string) {
+  public getOfflineSignerAuto(chainId: string) {
     return new CosmJSOfflineSigner(chainId, this)
   }
 
-  public getOfflineSignerOnlyAmino (chainId: string) {
+  public getOfflineSignerOnlyAmino(chainId: string) {
     return new CosmJSOfflineSignerOnlyAmino(chainId, this)
   }
 
@@ -295,7 +316,7 @@ class Coin98Client extends EventEmitter {
   private openURL(url: string, method: string) {
     // Santinize url
     const urlEncode = encodeURIComponent(url)
-    url = `coin98://app/${method}/${urlEncode}`
+    url = `saringan://app/${method}/${urlEncode}`
     if (window.location.hash) {
       // Simulate Href Click
       const aTag = document.createElement('a')
